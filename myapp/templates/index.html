@@ -980,13 +980,13 @@
   {% include 'level_modal.html' %}
   {% include 'chatbot_widget.html' %}
 
+  {% if user.is_authenticated and not user.is_superuser %}
   <script>
   // ── Global level-up detector ────────────────────────────────────────
   // Every game-play endpoint now returns a `level_up` key in its JSON
   // response on a level-up win. Rather than editing all 13 individual
   // game modal scripts, patch fetch() once here to watch every response
   // site-wide and pop a toast + refresh the level badges when it appears.
-  {% if user.is_authenticated and not user.is_superuser %}
   (function(){
     var origFetch = window.fetch;
     window.fetch = function(){

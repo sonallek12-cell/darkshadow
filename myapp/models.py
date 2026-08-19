@@ -10,10 +10,94 @@ class UserProfile(models.Model):
     phone_number = models.CharField(max_length=15, unique=True)
     is_above_18 = models.BooleanField(default=False)
     agreed_to_terms = models.BooleanField(default=False)
+    referral_code = models.CharField(max_length=12, unique=True, null=True, blank=True,
+        help_text='Unique code shared via this user\'s invite link')
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"{self.user.username} - Profile"
+
+
+class Referral(models.Model):
+    """Records a successful invite: referrer gets bonus_amount credited
+    to their wallet the moment the referred user completes signup."""
+    referrer      = models.ForeignKey(User, on_delete=models.CASCADE, related_name='referrals_made')
+    referred_user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='referred_by_record')
+    bonus_amount  = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('10.00'))
+    created_at    = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.referrer.username} invited {self.referred_user.username} (+₹{self.bonus_amount})"
+
+
+class UserLevel(models.Model):
+    """
+    Tracks player progression from Level 1 to Level 10. Winning
+    WINS_PER_LEVEL games at any game advances one level and credits an
+    escalating one-time bonus to the wallet (₹500 × the level just left,
+    so reaching Level 2 pays ₹500, Level 3 pays ₹1000, ... Level 10 pays
+    ₹4500). Progress is tracked here only — actual wallet crediting is
+    done by the caller so it happens inside the same DB transaction as
+    the game's own payout.
+    """
+    WINS_PER_LEVEL       = 10
+    MAX_LEVEL             = 10
+    LEVEL_UP_BASE_REWARD  = Decimal('500.00')
+
+    user          = models.OneToOneField(User, on_delete=models.CASCADE, related_name='level_info')
+    level         = models.PositiveSmallIntegerField(default=1)
+    wins_in_level = models.PositiveIntegerField(default=0)
+    total_wins    = models.PositiveIntegerField(default=0)
+    updated_at    = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'User Level'
+
+    def __str__(self):
+        return f"{self.user.username} — Level {self.level} ({self.wins_in_level}/{self.WINS_PER_LEVEL} wins)"
+
+    @classmethod
+    def get_or_create_for(cls, user):
+        obj, _ = cls.objects.get_or_create(user=user)
+        return obj
+
+    @property
+    def is_max_level(self):
+        return self.level >= self.MAX_LEVEL
+
+    @property
+    def reward_for_next_level(self):
+        """Bonus the player will receive on their NEXT level-up, or None if maxed out."""
+        if self.is_max_level:
+            return None
+        return self.LEVEL_UP_BASE_REWARD * self.level
+
+    @property
+    def wins_remaining(self):
+        """Wins still needed to reach the next level, or 0 if maxed out."""
+        if self.is_max_level:
+            return 0
+        return self.WINS_PER_LEVEL - self.wins_in_level
+
+    def register_win(self):
+        """Call once per game WIN (never on a loss or push). Returns
+        (leveled_up, level, reward) — reward is 0 unless leveled_up."""
+        self.total_wins += 1
+        if self.is_max_level:
+            self.save()
+            return False, self.level, Decimal('0.00')
+        self.wins_in_level += 1
+        if self.wins_in_level >= self.WINS_PER_LEVEL:
+            self.level += 1
+            self.wins_in_level = 0
+            reward = self.LEVEL_UP_BASE_REWARD * (self.level - 1)
+            self.save()
+            return True, self.level, reward
+        self.save()
+        return False, self.level, Decimal('0.00')
 
 
 class Wallet(models.Model):

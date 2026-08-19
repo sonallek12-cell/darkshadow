@@ -1,0 +1,128 @@
+{% comment %}
+  Invite & Earn Modal
+  Requires context: user, referral_link, referral_code, referral_count,
+                    referral_earned, referral_bonus_amount
+  Opened from the profile dropdown via openInviteModal(). Referring a
+  friend credits REFERRAL_BONUS_AMOUNT (₹10) to the referrer's wallet
+  the moment the invited friend completes signup — see signup_view.
+{% endcomment %}
+
+{% if user.is_authenticated and not user.is_superuser %}
+<div id="inviteModal" style="
+  display:none;position:fixed;inset:0;z-index:10000;
+  background:rgba(0,0,0,.75);backdrop-filter:blur(4px);
+  align-items:center;justify-content:center;
+  opacity:0;transition:opacity .25s ease;
+">
+  <div style="
+    background:linear-gradient(160deg,#1a1a2e 0%,#16213e 60%,#0f3460 100%);
+    border:1px solid rgba(255,210,0,.3);border-radius:20px;
+    padding:36px 32px;max-width:460px;width:92%;text-align:center;
+    box-shadow:0 0 60px rgba(255,210,0,.15);
+    position:relative;max-height:88vh;overflow-y:auto;
+    transform:scale(0.92);transition:transform .25s cubic-bezier(.34,1.56,.64,1);
+  ">
+    <button onclick="closeInviteModal()" style="
+      position:absolute;top:14px;right:18px;
+      background:none;border:none;color:#aaa;font-size:1.4rem;cursor:pointer;
+    ">✕</button>
+
+    <div style="font-size:3.2rem;margin-bottom:8px;">🎁</div>
+    <h2 style="color:#ffd200;font-size:1.5rem;margin-bottom:6px;">Invite &amp; Earn</h2>
+    <p style="color:#ccc;font-size:.92rem;margin-bottom:22px;line-height:1.5;">
+      Share your invite link with friends. The moment they sign up, you get
+      <strong style="color:#4ade80;">₹{{ referral_bonus_amount|floatformat:"-2" }}</strong> credited straight to your wallet — no limit on how many friends you invite.
+    </p>
+
+    <!-- Stats row -->
+    <div style="display:flex;gap:12px;margin-bottom:20px;">
+      <div style="flex:1;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:14px 10px;">
+        <div style="color:#ffd200;font-size:1.5rem;font-weight:800;">{{ referral_count }}</div>
+        <div style="color:#9ca3af;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;margin-top:2px;">Friends Invited</div>
+      </div>
+      <div style="flex:1;background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.25);border-radius:12px;padding:14px 10px;">
+        <div style="color:#4ade80;font-size:1.5rem;font-weight:800;">₹{{ referral_earned|floatformat:"-2" }}</div>
+        <div style="color:#9ca3af;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;margin-top:2px;">Total Earned</div>
+      </div>
+    </div>
+
+    <!-- Referral link -->
+    <div style="text-align:left;margin-bottom:8px;color:#9ca3af;font-size:.8rem;text-transform:uppercase;letter-spacing:.5px;">Your Invite Link</div>
+    <div style="display:flex;gap:8px;margin-bottom:22px;">
+      <input id="inviteLinkInput" type="text" readonly value="{{ referral_link }}" style="
+        flex:1;min-width:0;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);
+        border-radius:10px;padding:12px 14px;color:#fff;font-size:.85rem;
+      " onclick="this.select()">
+      <button id="inviteCopyBtn" onclick="copyReferralLink()" style="
+        flex-shrink:0;padding:0 18px;border:none;border-radius:10px;
+        background:linear-gradient(135deg,#f7971e,#ffd200);color:#1a1a2e;
+        font-weight:800;font-size:.85rem;cursor:pointer;transition:transform .15s;
+      " onmouseover="this.style.transform='scale(1.04)'" onmouseout="this.style.transform='scale(1)'">Copy</button>
+    </div>
+
+    <details class="how-to-play" style="text-align:left;">
+      <summary>❓ How it works</summary>
+      <div class="htp-body">
+        <ul>
+          <li>Share your unique invite link with friends via WhatsApp, SMS, or social media.</li>
+          <li>When someone signs up through your link, they get the usual welcome bonus — and you get ₹{{ referral_bonus_amount|floatformat:"-2" }} credited to your wallet instantly.</li>
+          <li>There's no cap — invite as many friends as you like and earn every time.</li>
+        </ul>
+      </div>
+    </details>
+
+    <p style="color:#666;font-size:.78rem;margin-top:16px;">18+ only · Gamble responsibly</p>
+  </div>
+</div>
+
+<style>
+@media (max-width:480px){
+  #inviteModal > div{padding:28px 20px;}
+}
+</style>
+
+<script>
+function showModalInvite(el) {
+  el.style.display = 'flex';
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      el.style.opacity = '1';
+      const inner = el.querySelector('div');
+      if (inner) inner.style.transform = 'scale(1)';
+    });
+  });
+}
+function hideModalInvite(el) {
+  el.style.opacity = '0';
+  const inner = el.querySelector('div');
+  if (inner) inner.style.transform = 'scale(0.92)';
+  setTimeout(() => { el.style.display = 'none'; }, 260);
+}
+function openInviteModal() {
+  showModalInvite(document.getElementById('inviteModal'));
+}
+function closeInviteModal() {
+  hideModalInvite(document.getElementById('inviteModal'));
+}
+function copyReferralLink() {
+  const input = document.getElementById('inviteLinkInput');
+  const btn = document.getElementById('inviteCopyBtn');
+  const done = () => {
+    const original = btn.textContent;
+    btn.textContent = 'Copied! ✓';
+    setTimeout(() => { btn.textContent = original; }, 1800);
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(input.value).then(done).catch(() => {
+      input.select();
+      document.execCommand('copy');
+      done();
+    });
+  } else {
+    input.select();
+    document.execCommand('copy');
+    done();
+  }
+}
+</script>
+{% endif %}

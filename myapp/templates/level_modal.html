@@ -1,0 +1,151 @@
+{% comment %}
+  My Level Modal
+  Requires context: user, user_level, level_wins_per_level, level_max,
+                    level_reward_table
+  Opened from the profile dropdown and the homepage level-progress strip
+  via openLevelModal(). Progress is server-authoritative (UserLevel
+  model) — a game win credited server-side via _award_level_progress()
+  is what actually advances it; this modal only displays it.
+{% endcomment %}
+
+{% if user.is_authenticated and not user.is_superuser and user_level %}
+<div id="levelModal" style="
+  display:none;position:fixed;inset:0;z-index:10000;
+  background:rgba(0,0,0,.75);backdrop-filter:blur(4px);
+  align-items:center;justify-content:center;
+  opacity:0;transition:opacity .25s ease;
+">
+  <div style="
+    background:linear-gradient(160deg,#1a1a2e 0%,#16213e 60%,#0f3460 100%);
+    border:1px solid rgba(255,210,0,.3);border-radius:20px;
+    padding:36px 32px;max-width:480px;width:92%;text-align:center;
+    box-shadow:0 0 60px rgba(255,210,0,.15);
+    position:relative;max-height:88vh;overflow-y:auto;
+    transform:scale(0.92);transition:transform .25s cubic-bezier(.34,1.56,.64,1);
+  ">
+    <button onclick="closeLevelModal()" style="
+      position:absolute;top:14px;right:18px;
+      background:none;border:none;color:#aaa;font-size:1.4rem;cursor:pointer;
+    ">✕</button>
+
+    <div style="font-size:3.2rem;margin-bottom:4px;">⭐</div>
+    <h2 style="color:#ffd200;font-size:1.5rem;margin-bottom:4px;">My Level</h2>
+    <div id="levelModalCurrent" style="color:#fff;font-size:2.6rem;font-weight:900;font-family:'Orbitron',sans-serif;margin:6px 0 4px;">{{ user_level.level }}</div>
+    <p id="levelModalSub" style="color:#9ca3af;font-size:.85rem;margin-bottom:18px;">
+      {% if user_level.is_max_level %}You've reached the top — Level {{ level_max }}!{% else %}out of {{ level_max }} levels &middot; {{ user_level.total_wins }} total wins{% endif %}
+    </p>
+
+    <!-- Progress bar -->
+    <div style="background:rgba(255,255,255,.08);border-radius:10px;height:14px;overflow:hidden;margin-bottom:8px;">
+      <div id="levelModalBar" style="height:100%;background:linear-gradient(90deg,#f7971e,#ffd200);border-radius:10px;width:{% widthratio user_level.wins_in_level level_wins_per_level 100 %}%;transition:width .3s ease;"></div>
+    </div>
+    <div id="levelModalProgressText" style="color:#ccc;font-size:.82rem;margin-bottom:20px;">
+      {% if user_level.is_max_level %}Max level reached — keep playing, wins still count!{% else %}{{ user_level.wins_in_level }}/{{ level_wins_per_level }} wins toward Level {{ user_level.level|add:"1" }}{% endif %}
+    </div>
+
+    {% if not user_level.is_max_level %}
+    <div id="levelModalRewardBox" style="
+      background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.25);
+      border-radius:12px;padding:14px;margin-bottom:20px;
+    ">
+      <span style="color:#9ca3af;font-size:.82rem;">Next level-up reward</span><br>
+      <span style="color:#4ade80;font-size:1.3rem;font-weight:800;">₹{{ user_level.reward_for_next_level|floatformat:"-2" }}</span>
+    </div>
+    {% endif %}
+
+    <details class="how-to-play" style="text-align:left;">
+      <summary>❓ How Leveling Works</summary>
+      <div class="htp-body">
+        <ul>
+          <li>Win {{ level_wins_per_level }} games — in any game on the site — to level up by 1.</li>
+          <li>Every level-up instantly credits a bonus to your wallet so you always have more to play with.</li>
+          <li>The bonus grows with every level: ₹500 for Level 2, up to ₹{{ level_reward_table.8.reward|floatformat:"-2" }} for Level {{ level_max }}.</li>
+          <li>Levels top out at {{ level_max }} — after that, every win still counts toward your total stats.</li>
+          <li>Only wins count toward progress — a loss or a push (tie) doesn't move the bar.</li>
+        </ul>
+      </div>
+    </details>
+
+    <!-- Reward table -->
+    <div style="text-align:left;margin-top:16px;">
+      <div style="color:#9ca3af;font-size:.78rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">Level-Up Rewards</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
+        {% for row in level_reward_table %}
+        <div style="
+          background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:8px;
+          padding:8px 6px;text-align:center;
+          {% if user_level.level == row.level %}border-color:#ffd200;background:rgba(255,210,0,.1);{% endif %}
+        ">
+          <div style="color:#ffd200;font-size:.78rem;font-weight:700;">Lvl {{ row.level }}</div>
+          <div style="color:#4ade80;font-size:.85rem;font-weight:700;">₹{{ row.reward|floatformat:"-2" }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <p style="color:#666;font-size:.78rem;margin-top:18px;">18+ only · Gamble responsibly</p>
+  </div>
+</div>
+
+<style>
+@media (max-width:480px){
+  #levelModal > div{padding:28px 20px;}
+}
+</style>
+
+<script>
+const LEVEL_MAX_NUM = {{ level_max }};
+const LEVEL_WINS_PER_LEVEL_NUM = {{ level_wins_per_level }};
+const LEVEL_REWARD_TABLE = [{% for row in level_reward_table %}{level:{{ row.level }},reward:{{ row.reward }}}{% if not forloop.last %},{% endif %}{% endfor %}];
+
+function showModalLevel(el) {
+  el.style.display = 'flex';
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      el.style.opacity = '1';
+      const inner = el.querySelector('div');
+      if (inner) inner.style.transform = 'scale(1)';
+    });
+  });
+}
+function hideModalLevel(el) {
+  el.style.opacity = '0';
+  const inner = el.querySelector('div');
+  if (inner) inner.style.transform = 'scale(0.92)';
+  setTimeout(() => { el.style.display = 'none'; }, 260);
+}
+function openLevelModal() {
+  showModalLevel(document.getElementById('levelModal'));
+}
+function closeLevelModal() {
+  hideModalLevel(document.getElementById('levelModal'));
+}
+
+// Called by the global level-up toast handler in index.html right after
+// a level-up — updates the modal's numbers optimistically (progress
+// resets to 0/N on the new level) without needing a page reload.
+function refreshLevelModal(newLevel) {
+  const cur = document.getElementById('levelModalCurrent');
+  if (cur) cur.textContent = newLevel;
+  const isMax = newLevel >= LEVEL_MAX_NUM;
+  const bar = document.getElementById('levelModalBar');
+  if (bar) bar.style.width = '0%';
+  const progressText = document.getElementById('levelModalProgressText');
+  if (progressText) {
+    progressText.textContent = isMax
+      ? 'Max level reached — keep playing, wins still count!'
+      : `0/${LEVEL_WINS_PER_LEVEL_NUM} wins toward Level ${newLevel + 1}`;
+  }
+  const rewardBox = document.getElementById('levelModalRewardBox');
+  if (rewardBox) {
+    if (isMax) {
+      rewardBox.style.display = 'none';
+    } else {
+      const row = LEVEL_REWARD_TABLE.find(r => r.level === newLevel + 1);
+      const amountEl = rewardBox.querySelector('span:last-child');
+      if (row && amountEl) amountEl.textContent = '₹' + row.reward.toFixed(2);
+    }
+  }
+}
+</script>
+{% endif %}

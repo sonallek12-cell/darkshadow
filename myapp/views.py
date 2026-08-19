@@ -25,7 +25,7 @@ from .models import (
     PokerSettings, PokerBet, RummySettings, RummyBet,
     CrashSettings, CrashRound, ContactMessage,
     SiteSettings, PlatformEarning, SMTPSettings,
-    SiteCustomization, PWASettings,
+    SiteCustomization, PWASettings, Referral, UserLevel,
 )
 import razorpay
 import os
@@ -37,6 +37,8 @@ import secrets
 ADMIN_USERNAME = 'admin'
 ADMIN_EMAIL    = 'admin@gmail.com'
 ADMIN_PASSWORD = '123456'
+
+REFERRAL_BONUS_AMOUNT = Decimal('10.00')
 
 
 # ── Key resolution: DB → env vars ──────────────────────────────────────────────
@@ -347,13 +349,67 @@ def _get_or_create_spin_wallet(user):
     return sw
 
 
+def _generate_referral_code():
+    """8-char hex code, checked for uniqueness against existing profiles."""
+    while True:
+        code = secrets.token_hex(4).upper()
+        if not UserProfile.objects.filter(referral_code=code).exists():
+            return code
+
+
+def _get_or_create_referral_code(profile):
+    if not profile.referral_code:
+        profile.referral_code = _generate_referral_code()
+        profile.save(update_fields=['referral_code'])
+    return profile.referral_code
+
+
+def _level_reward_table():
+    """[{level, reward}, ...] for levels 2..MAX_LEVEL — used to render the
+    'how it works' reward table in the level modal."""
+    return [
+        {'level': lvl, 'reward': UserLevel.LEVEL_UP_BASE_REWARD * (lvl - 1)}
+        for lvl in range(2, UserLevel.MAX_LEVEL + 1)
+    ]
+
+
+def _award_level_progress(user, wallet):
+    """Call once per game WIN (never on a loss/push). Increments the
+    player's level progress and, on level-up, credits the escalating
+    bonus straight onto the wallet object already locked by the caller's
+    transaction — the caller's own wallet.save() persists it. Returns a
+    JSON-serializable dict on level-up, else None."""
+    lvl, _ = UserLevel.objects.select_for_update().get_or_create(user=user)
+    leveled_up, new_level, reward = lvl.register_win()
+    if leveled_up:
+        wallet.balance += reward
+        WalletTransaction.objects.create(
+            wallet=wallet, amount=reward, txn_type='credit',
+            description=f'Level {new_level} bonus reward',
+        )
+        return {'new_level': new_level, 'reward': float(reward)}
+    return None
+
+
 # ── Home ───────────────────────────────────────────────────────────────────────
 def home(request):
     spin_wallet = None
     wallet      = None
+    user_level      = None
+    referral_code   = ''
+    referral_link   = ''
+    referral_count  = 0
+    referral_earned = Decimal('0.00')
     if request.user.is_authenticated and not request.user.is_superuser:
         spin_wallet = _get_or_create_spin_wallet(request.user)
         wallet      = _get_or_create_wallet(request.user)
+        user_level  = UserLevel.get_or_create_for(request.user)
+        profile = getattr(request.user, 'profile', None)
+        if profile:
+            referral_code = _get_or_create_referral_code(profile)
+            referral_link = request.build_absolute_uri(reverse('signup')) + f'?ref={referral_code}'
+        referral_count  = Referral.objects.filter(referrer=request.user).count()
+        referral_earned = referral_count * REFERRAL_BONUS_AMOUNT
     key_id, _ = get_razorpay_keys()
     spin_cfg      = get_spin_settings()
     coinflip_cfg  = get_coinflip_settings()
@@ -372,6 +428,15 @@ def home(request):
     return render(request, 'index.html', {
         'spin_wallet':              spin_wallet,
         'wallet':                   wallet,
+        'user_level':               user_level,
+        'level_wins_per_level':     UserLevel.WINS_PER_LEVEL,
+        'level_max':                UserLevel.MAX_LEVEL,
+        'level_reward_table':       _level_reward_table(),
+        'referral_code':            referral_code,
+        'referral_link':            referral_link,
+        'referral_count':           referral_count,
+        'referral_earned':          referral_earned,
+        'referral_bonus_amount':    REFERRAL_BONUS_AMOUNT,
         'razorpay_key_id':          key_id,
         'signup_bonus_amount':      site_custom_cfg.signup_bonus_amount,
         'spin_pack_amount':         spin_cfg.spin_pack_amount,
@@ -484,6 +549,7 @@ def signup_view(request):
         password2   = request.POST.get('password2', '')
         above_18    = request.POST.get('above_18')
         agree_terms = request.POST.get('agree_terms')
+        ref_code    = request.POST.get('ref_code', '').strip().upper()
         if not first_name:
             messages.error(request, 'First name is required.')
             return render(request, 'signup.html', {'form_data': request.POST})
@@ -521,9 +587,10 @@ def signup_view(request):
             username=username, password=password1, email=email,
             first_name=first_name, last_name=last_name,
         )
-        UserProfile.objects.create(
+        profile = UserProfile.objects.create(
             user=user, last_name=last_name, age=int(age),
             phone_number=phone, is_above_18=True, agreed_to_terms=True,
+            referral_code=_generate_referral_code(),
         )
         bonus_amount = get_site_customization().signup_bonus_amount
         wallet = Wallet.objects.create(user=user, balance=bonus_amount)
@@ -532,10 +599,29 @@ def signup_view(request):
             description='Welcome bonus — new account signup',
         )
         SpinWallet.objects.create(user=user)
+        UserLevel.objects.create(user=user)
+
+        if ref_code:
+            referrer_profile = UserProfile.objects.filter(referral_code=ref_code).exclude(user=user).first()
+            if referrer_profile:
+                with transaction.atomic():
+                    Referral.objects.create(
+                        referrer=referrer_profile.user, referred_user=user,
+                        bonus_amount=REFERRAL_BONUS_AMOUNT,
+                    )
+                    referrer_wallet, _ = Wallet.objects.select_for_update().get_or_create(user=referrer_profile.user)
+                    referrer_wallet.balance += REFERRAL_BONUS_AMOUNT
+                    referrer_wallet.save()
+                    WalletTransaction.objects.create(
+                        wallet=referrer_wallet, amount=REFERRAL_BONUS_AMOUNT, txn_type='credit',
+                        description=f'Referral bonus — invited {first_name or username}',
+                    )
+
         bonus_display = bonus_amount.to_integral_value() if bonus_amount == bonus_amount.to_integral_value() else bonus_amount.normalize()
         messages.success(request, f'Account created successfully! Welcome to Darkshadow, {first_name}! 🎉 We\'ve added ₹{bonus_display} to your wallet. Please log in.')
         return redirect('login')
-    return render(request, 'signup.html')
+    ref_code = request.GET.get('ref', '').strip().upper()
+    return render(request, 'signup.html', {'ref_code': ref_code})
 
 
 # ── Contact Us ───────────────────────────────────────────────────────────────────
@@ -1389,12 +1475,14 @@ def coinflip_play(request):
         won    = (result == choice)
         payout = (bet_amount * cfg.win_multiplier).quantize(Decimal('0.01')) if won else Decimal('0.00')
 
+        level_up = None
         if won:
             wallet.balance += payout
             WalletTransaction.objects.create(
                 wallet=wallet, amount=payout, txn_type='credit',
                 description='Coin Flip payout',
             )
+            level_up = _award_level_progress(request.user, wallet)
         wallet.save()
 
         CoinFlipBet.objects.create(
@@ -1408,6 +1496,7 @@ def coinflip_play(request):
         'won':         won,
         'payout':      float(payout),
         'new_balance': float(wallet.balance),
+        'level_up':    level_up,
     })
 
 
@@ -1467,12 +1556,14 @@ def dice_play(request):
         won  = (roll < target) if direction == 'under' else (roll > target)
         payout = (bet_amount * multiplier).quantize(Decimal('0.01')) if won else Decimal('0.00')
 
+        level_up = None
         if won:
             wallet.balance += payout
             WalletTransaction.objects.create(
                 wallet=wallet, amount=payout, txn_type='credit',
                 description='Dice Roll payout',
             )
+            level_up = _award_level_progress(request.user, wallet)
         wallet.save()
 
         DiceBet.objects.create(
@@ -1487,6 +1578,7 @@ def dice_play(request):
         'multiplier':  float(multiplier),
         'payout':      float(payout),
         'new_balance': float(wallet.balance),
+        'level_up':    level_up,
     })
 
 
@@ -1605,8 +1697,10 @@ def cardhilo_resolve(request):
         payout = (round_obj.bet_amount * multiplier).quantize(Decimal('0.01')) if won else Decimal('0.00')
 
         wallet, _ = Wallet.objects.select_for_update().get_or_create(user=request.user)
+        level_up = None
         if won:
             wallet.balance += payout
+            level_up = _award_level_progress(request.user, wallet)
             wallet.save()
             WalletTransaction.objects.create(
                 wallet=wallet, amount=payout, txn_type='credit',
@@ -1631,6 +1725,7 @@ def cardhilo_resolve(request):
         'multiplier':  float(multiplier),
         'payout':      float(payout),
         'new_balance': float(wallet.balance),
+        'level_up':    level_up,
     })
 
 
@@ -1674,12 +1769,14 @@ def andarbahar_play(request):
         won    = (result == choice)
         payout = (bet_amount * cfg.win_multiplier).quantize(Decimal('0.01')) if won else Decimal('0.00')
 
+        level_up = None
         if won:
             wallet.balance += payout
             WalletTransaction.objects.create(
                 wallet=wallet, amount=payout, txn_type='credit',
                 description='Andar Bahar payout',
             )
+            level_up = _award_level_progress(request.user, wallet)
         wallet.save()
 
         AndarBaharBet.objects.create(
@@ -1693,6 +1790,7 @@ def andarbahar_play(request):
         'won':         won,
         'payout':      float(payout),
         'new_balance': float(wallet.balance),
+        'level_up':    level_up,
     })
 
 
@@ -1756,12 +1854,14 @@ def roulette_play(request):
 
         payout = (bet_amount * multiplier).quantize(Decimal('0.01')) if won else Decimal('0.00')
 
+        level_up = None
         if won:
             wallet.balance += payout
             WalletTransaction.objects.create(
                 wallet=wallet, amount=payout, txn_type='credit',
                 description='Roulette payout',
             )
+            level_up = _award_level_progress(request.user, wallet)
         wallet.save()
 
         RouletteBet.objects.create(
@@ -1778,6 +1878,7 @@ def roulette_play(request):
         'multiplier':    float(multiplier),
         'payout':        float(payout),
         'new_balance':   float(wallet.balance),
+        'level_up':      level_up,
     })
 
 
@@ -1839,12 +1940,14 @@ def sicbo_play(request):
 
         payout = (bet_amount * multiplier).quantize(Decimal('0.01')) if won else Decimal('0.00')
 
+        level_up = None
         if won:
             wallet.balance += payout
             WalletTransaction.objects.create(
                 wallet=wallet, amount=payout, txn_type='credit',
                 description='Sic Bo payout',
             )
+            level_up = _award_level_progress(request.user, wallet)
         wallet.save()
 
         SicBoBet.objects.create(
@@ -1860,6 +1963,7 @@ def sicbo_play(request):
         'multiplier':  float(multiplier),
         'payout':      float(payout),
         'new_balance': float(wallet.balance),
+        'level_up':    level_up,
     })
 
 
@@ -1973,8 +2077,11 @@ def teenpatti_play(request):
             outcome = 'push'
             payout  = bet_amount
 
+        level_up = None
         if payout > 0:
             wallet.balance += payout
+            if outcome == 'win':
+                level_up = _award_level_progress(request.user, wallet)
             WalletTransaction.objects.create(
                 wallet=wallet, amount=payout, txn_type='credit',
                 description=f"Teen Patti {'payout' if outcome == 'win' else 'push refund'}",
@@ -1997,6 +2104,7 @@ def teenpatti_play(request):
         'outcome':          outcome,
         'payout':           float(payout),
         'new_balance':      float(wallet.balance),
+        'level_up':         level_up,
     })
 
 
@@ -2085,8 +2193,11 @@ def blackjack_deal(request):
             else:
                 outcome, payout = 'lose', Decimal('0.00')
 
+            level_up = None
             if payout > 0:
                 wallet.balance += payout
+                if outcome == 'blackjack_win':
+                    level_up = _award_level_progress(request.user, wallet)
                 WalletTransaction.objects.create(
                     wallet=wallet, amount=payout, txn_type='credit',
                     description=f"Blackjack {'payout' if 'win' in outcome else 'push refund'}",
@@ -2110,6 +2221,7 @@ def blackjack_deal(request):
                 'outcome':      outcome,
                 'payout':       float(payout),
                 'new_balance':  float(wallet.balance),
+                'level_up':     level_up,
             })
 
         wallet.save()
@@ -2233,8 +2345,11 @@ def blackjack_stand(request):
             payout  = round_obj.bet_amount
 
         wallet, _ = Wallet.objects.select_for_update().get_or_create(user=request.user)
+        level_up = None
         if payout > 0:
             wallet.balance += payout
+            if outcome == 'win':
+                level_up = _award_level_progress(request.user, wallet)
             wallet.save()
             WalletTransaction.objects.create(
                 wallet=wallet, amount=payout, txn_type='credit',
@@ -2258,6 +2373,7 @@ def blackjack_stand(request):
         'outcome':      outcome,
         'payout':       float(payout),
         'new_balance':  float(wallet.balance),
+        'level_up':     level_up,
     })
 
 
@@ -2368,8 +2484,11 @@ def baccarat_play(request):
             outcome = 'lose'
             payout = Decimal('0.00')
 
+        level_up = None
         if payout > 0:
             wallet.balance += payout
+            if outcome == 'win':
+                level_up = _award_level_progress(request.user, wallet)
             WalletTransaction.objects.create(
                 wallet=wallet, amount=payout, txn_type='credit',
                 description=f"Baccarat {'payout' if outcome == 'win' else 'push refund'}",
@@ -2393,6 +2512,7 @@ def baccarat_play(request):
         'outcome':      outcome,
         'payout':       float(payout),
         'new_balance':  float(wallet.balance),
+        'level_up':     level_up,
     })
 
 
@@ -2512,8 +2632,11 @@ def poker_play(request):
             outcome = 'push'
             payout  = bet_amount
 
+        level_up = None
         if payout > 0:
             wallet.balance += payout
+            if outcome == 'win':
+                level_up = _award_level_progress(request.user, wallet)
             WalletTransaction.objects.create(
                 wallet=wallet, amount=payout, txn_type='credit',
                 description=f"Poker {'payout' if outcome == 'win' else 'push refund'}",
@@ -2536,6 +2659,7 @@ def poker_play(request):
         'outcome':          outcome,
         'payout':           float(payout),
         'new_balance':      float(wallet.balance),
+        'level_up':         level_up,
     })
 
 
@@ -2648,8 +2772,11 @@ def rummy_play(request):
         outcome = 'win' if valid_count > 0 else 'lose'
         payout  = (bet_amount * multiplier).quantize(Decimal('0.01')) if valid_count > 0 else Decimal('0.00')
 
+        level_up = None
         if payout > 0:
             wallet.balance += payout
+            if outcome == 'win':
+                level_up = _award_level_progress(request.user, wallet)
             WalletTransaction.objects.create(
                 wallet=wallet, amount=payout, txn_type='credit',
                 description='Rummy payout',
@@ -2671,6 +2798,7 @@ def rummy_play(request):
         'multiplier':        float(multiplier),
         'payout':            float(payout),
         'new_balance':       float(wallet.balance),
+        'level_up':          level_up,
     })
 
 
@@ -2839,6 +2967,7 @@ def crash_cashout(request):
         if current < round_obj.crash_multiplier:
             payout = (round_obj.bet_amount * current).quantize(Decimal('0.01'))
             wallet.balance += payout
+            level_up = _award_level_progress(request.user, wallet)
             wallet.save()
             WalletTransaction.objects.create(
                 wallet=wallet, amount=payout, txn_type='credit',
@@ -2856,6 +2985,7 @@ def crash_cashout(request):
                 'cashout_multiplier': float(current),
                 'payout':             float(payout),
                 'new_balance':        float(wallet.balance),
+                'level_up':           level_up,
             })
 
         round_obj.status = 'resolved'
